@@ -16,6 +16,7 @@
 
 import glob
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FormatStrFormatter, PercentFormatter
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -33,7 +34,7 @@ def quarantine_matters():
   # - quarantine of enough random individuals to attain the same results on infection.
   N = 10000
   G = generate_scale_free_graph(N, 2, 5, 0.4)
-  for prob_detected_and_quarantined, quarantine_neighbors in [
+  for prob_infected_detected, quarantine_neighbors in [
       (0.05, True),  # Quarantine including neighbors - early containment. Less quarantine too!
       (0.05, False),  # Quarantine only of infected - 0.5 population infected
       (0.01, True),  # Quarantine including neighbors, but less testing - 0.5 infected. And even more quarantine than previous option!
@@ -42,7 +43,7 @@ def quarantine_matters():
     prob_infect = 0.02
     prob_recover = 0.02
     prob_infect_exposed_factor = 0  # Exposed don't infect. Legacy behavior.
-    results = simulation(N, G, prob_detected_and_quarantined=prob_detected_and_quarantined,
+    results = simulation(N, G, prob_infected_detected=prob_infected_detected,
                          quarantine_neighbors=quarantine_neighbors, prob_infect=prob_infect,
                          prob_recover=prob_recover, prob_infect_exposed_factor=prob_infect_exposed_factor,
                          max_steps=5000)
@@ -59,7 +60,7 @@ def sensitive_to_gamma():
   N = 10000
   for gamma in [0.8, 0.4, 0.1, 0.05, 0]:
     G = generate_scale_free_graph(N, 2, 5, gamma)
-    results = simulation(N, G, prob_infect=0.005, prob_recover=0.02, prob_detected_and_quarantined=0, quarantine_neighbors=False, max_steps=5000)
+    results = simulation(N, G, prob_infect=0.005, prob_recover=0.02, prob_infected_detected=0, quarantine_neighbors=False, max_steps=5000)
     results.summary(hyperparams=False, G_attrs=True, plot=True)
     print()
 
@@ -207,39 +208,41 @@ def estimate_effective_exposed_infectious_time(incubation_duration_mean=INCUBATI
   return days_infectious_exposed
 
 
-def ballpark_r0(prob_infect=PROB_INFECT, prob_recover=PROB_RECOVER, incubation_duration_mean=INCUBATION_DURATION_MEAN, incubation_duration_std=INCUBATION_DURATION_STD, duration_exposed_infects=DURATION_EXPOSED_INFECTS, prob_infect_exposed_factor=PROB_INFECT_EXPOSED_FACTOR, mean_degree=MEAN_DEGREE, prob_infected_detected=0, prob_exposed_detected=0, **kwargs):
-  """Naive back of the envelope calculation of R0 for Exposed, Infected, and total.
+def ballpark_r(prob_infect=PROB_INFECT, prob_recover=PROB_RECOVER, incubation_duration_mean=INCUBATION_DURATION_MEAN, incubation_duration_std=INCUBATION_DURATION_STD, duration_exposed_infects=DURATION_EXPOSED_INFECTS, prob_infect_exposed_factor=PROB_INFECT_EXPOSED_FACTOR, mean_degree=MEAN_DEGREE, prob_infected_detected=0, prob_exposed_detected=0, **kwargs):
+  """Naive back of the envelope calculation of r for Exposed, Infected, and total.
 
+  r is the expected number of individuals infected by a single random person if
+  that person is infectious and all others are Susceptible
   Default is without quarantine. But can be adjusted using argument
   prob_infected_detected (default=0).
   """
+  # TODO: use degree instead of degree-1, as per the definition of r.
   if prob_exposed_detected != 0:
     raise NotImplementedError(f"Currently can't handle prob_exposed_detected != 0. Received {prob_exposed_detected}")
   # Exposed stage.
   days_infectious_exposed = estimate_effective_exposed_infectious_time(
       incubation_duration_mean, incubation_duration_std, duration_exposed_infects)  # 3.58
-  prob_infect_exposed = prob_infect * prob_infect_exposed_factor  # 0.02 (per day per neighbor)
-  n_susceptible_neighbors = mean_degree - 1  # That node was already infected from a neighbor. So 7 susceptible neighbors.
-  exposed_r0 = days_infectious_exposed * prob_infect_exposed * n_susceptible_neighbors  # 0.50
+  prob_infect_exposed = prob_infect * prob_infect_exposed_factor
+  n_susceptible_neighbors = mean_degree - 1  # That node was already infected from a neighbor. So deg-1 susceptible neighbors.
+  exposed_r = days_infectious_exposed * prob_infect_exposed * n_susceptible_neighbors  # 0.50
 
   # Infected stage.
   prob_end_infected = 1 - (1 - prob_recover) * (1 - min(prob_infected_detected, 1))
-  days_infectious = 1 / prob_end_infected  # 3.5 days on average.
+  days_infectious = 1 / prob_end_infected
   # This term introduces slight non-linearity in prob_infect.
-  n_susceptible_neighbors = mean_degree - 1 - exposed_r0  # 7 susceptible neighbors as before, but 0.5 was infected at the exposed stage.
-  infected_r0 = days_infectious * prob_infect * n_susceptible_neighbors  # 0.91
+  n_susceptible_neighbors = mean_degree - 1 - exposed_r  # 7 susceptible neighbors as before, but 0.5 was infected at the exposed stage.
+  infected_r = days_infectious * prob_infect * n_susceptible_neighbors  # 0.91
 
   # This is almost linear in prob_infect and inversely linear in all the durations.
-  # To make it work out to R0=2.4, we need all the durations to be about 2.4/1.4=1.7 times longer.
-  total_r0 = exposed_r0 + infected_r0  # 1.41 - too low.
-  return exposed_r0, infected_r0, total_r0
+  total_r = exposed_r + infected_r
+  return exposed_r, infected_r, total_r
 
 
 def how_doublings_scale(factor=2, n_runs=5):
   """Investigate the scaling of doubling time."""
   G = generate_scale_free_graph(N, 2, 8, 0.4)
   G_mean_degree = G.number_of_edges() * 2 / G.number_of_nodes()
-  print('Base R0:', ballpark_r0())
+  print('Base R0:', ballpark_r())
   print('factor:', factor)
 
   # All durations are scaled by 'factor', prob_infect divided by 'factor'.
@@ -249,7 +252,7 @@ def how_doublings_scale(factor=2, n_runs=5):
   results = rerun_experiment(func, n_runs)
   print('All durations stretched by factor, prob_infect divided by factor.')
   print('Doubling days:', results.doubling_days)
-  print('R0:', ballpark_r0(**kwargs, mean_degree=G_mean_degree))
+  print('R0:', ballpark_r(**kwargs, mean_degree=G_mean_degree))
 
   # prob_infect is not scaled. Doubling days are the same ~3 as originally.
   kwargs['prob_infect'] = PROB_INFECT
@@ -257,7 +260,7 @@ def how_doublings_scale(factor=2, n_runs=5):
   results = rerun_experiment(func, n_runs)
   print('All durations stretched by factor, prob_infect unchanged.')
   print('Doubling days:', results.doubling_days)
-  print('R0:', ballpark_r0(**kwargs, mean_degree=G_mean_degree))
+  print('R0:', ballpark_r(**kwargs, mean_degree=G_mean_degree))
 
   # Try more connections, but scale back prob_infect to offset it.
   # Doubling days stay the same, ~3.
@@ -268,7 +271,7 @@ def how_doublings_scale(factor=2, n_runs=5):
   results = rerun_experiment(func, n_runs)
   print('Graph with larger mean degree. prob_infect decreased to maintain R0.')
   print('Doubling days:', results.doubling_days)
-  print('R0:', ballpark_r0(**kwargs, mean_degree=H_mean_degree))
+  print('R0:', ballpark_r(**kwargs, mean_degree=H_mean_degree))
   # results.summary(True, plot=True)
 
   # Without scaling prob_infect, doubling time sort of inversely proportional to mean degree - 1.
@@ -279,7 +282,7 @@ def how_doublings_scale(factor=2, n_runs=5):
   results = rerun_experiment(func, n_runs)
   print('Graph with larger mean degree. prob_infect stays the same.')
   print('Doubling days:', results.doubling_days)
-  print('R0:', ballpark_r0(**kwargs, mean_degree=H_mean_degree))
+  print('R0:', ballpark_r(**kwargs, mean_degree=H_mean_degree))
 
 
 def draw_infection_times(prob_infect_exposed_factor=PROB_INFECT_EXPOSED_FACTOR,
@@ -331,27 +334,39 @@ def compare_serial_intervals(**kwargs):
   sns.distplot(gamma_values)  # Not exactly the same.
 
 
-def check_graph_params(min_degree=MIN_DEGREE, mean_degree=MEAN_DEGREE, gamma=GAMMA, N=N):
-  degs = generate_power_law_degrees(N, min_degree, mean_degree, gamma)
+def plot_degree_distribution(min_degree=MIN_DEGREE, mean_degree=MEAN_DEGREE, gammas=[GAMMA], N=N):
+  """Plots the degree distribution (by the args) and prints some stats."""
+  fig, ax = plt.subplots()
+  for gamma in gammas:
+    degs = generate_power_law_degrees(N, min_degree, mean_degree, gamma)
+    # Degree histogram
+    ax = sns.distplot(degs, kde=False, label=gamma, ax=ax)
+    # hist_kws={'alpha':0.2}, bins=np.arange(0, 1200, 20),
+  ax.set_yscale('log')
+  ax.set_xlabel('Degree')
+  ax.set_ylabel('Number of nodes')
+  ax.legend(title='gamma')
+  ax.set_title(f'Degree distribution (log scale) for N={N} nodes, mean={mean_degree}')
   print(np.median(degs), np.sort(degs)[-int(0.001 * N)])  # (median, top 0.1%)
+  return ax
 
 
-def show_r0_not_accurate():
-  """Exponential growth despite R0 < 1."""
+def show_r_less_than_R():
+  """Exponential growth despite r < 1."""
   G = generate_scale_free_graph(N, 2, 20, 0.2)
   G_mean_degree = G.number_of_edges() * 2 / G.number_of_nodes()
   prob_infect = 0.024  # calibrated for 3-day doubling w/o quarantine.
-  prob_detected_and_quarantined = 0.8
-  r0 = ballpark_r0(prob_infect, mean_degree=G_mean_degree, prob_detected_and_quarantined=prob_detected_and_quarantined)
-  print('R0:', r0)  # Total < 1
-  results = repeated_sim(prob_infect=prob_infect, G=G, prob_detected_and_quarantined=prob_detected_and_quarantined, n_runs=3)
+  prob_infected_detected = 0.8
+  r = ballpark_r(prob_infect, mean_degree=G_mean_degree, prob_infected_detected=prob_infected_detected)
+  print('r:', r)  # Total < 1
+  results = repeated_sim(prob_infect=prob_infect, G=G, prob_infected_detected=prob_infected_detected, n_runs=3)
   results.summary(plot=True)  # Exponential growth.
 
   prob_infect = 0.01
-  prob_detected_and_quarantined = 0.0
-  r0 = ballpark_r0(prob_infect, mean_degree=G_mean_degree, prob_detected_and_quarantined=prob_detected_and_quarantined)
-  results = repeated_sim(prob_infect=prob_infect, G=G, prob_detected_and_quarantined=prob_detected_and_quarantined, n_runs=3)
-  print('R0:', r0)
+  prob_infected_detected = 0.0
+  r = ballpark_r(prob_infect, mean_degree=G_mean_degree, prob_infected_detected=prob_infected_detected)
+  results = repeated_sim(prob_infect=prob_infect, G=G, prob_infected_detected=prob_infected_detected, n_runs=3)
+  print('r:', r)
   results.summary(plot=True)
 
 
@@ -360,7 +375,7 @@ def plot_ratio_exposed_infected(results):
   return results.df.set_index('day').eval('exposed / infected').plot()
 
 
-def plot_result_list(result_lst, columns=None):
+def plot_result_list(result_lst, columns=None, vertical=False, plot_title=True):
   """Plots a list of SimulationResults on the same axes.
 
   Args:
@@ -375,16 +390,26 @@ def plot_result_list(result_lst, columns=None):
   df_wide = df_long.pivot_table(index='day', columns='run_idx').ffill()
   avg_df_normed = avg_result.df.set_index('day') / avg_result.N
   alpha = 0.2
-  fig, ax_arr = plt.subplots(1, 2)
-  title = str({k: round(v, 3) for k, v in avg_result.hyperparams.items()})
-  fig.suptitle(title, fontsize=18)
+  if vertical:
+    fig, ax_arr = plt.subplots(2, 1, figsize=(10, 20))
+    ax_arr[0].set_title('Epidemic Simulations')
+    ax_arr[1].set_title('log scale')
+    plot_title = False
+  else:
+    fig, ax_arr = plt.subplots(1, 2)
+
+  if plot_title:
+    title = str({k: round(v, 3) for k, v in avg_result.hyperparams.items()})
+    fig.suptitle(title, fontsize=18)
+
   for group in columns:
     for pane_ind, logy in enumerate([False, True]):
       color = GROUP2COLOR.get(group, 'grey')
       ax = df_wide[group].plot(c=color, alpha=alpha, logy=logy, legend=False, ax=ax_arr[pane_ind])
-      ax = avg_df_normed[group].plot(c=color, linewidth=2, logy=logy, ax=ax)
+      ax = avg_df_normed[group].plot(c=color, linewidth=2, logy=logy, label=group, legend=True, ax=ax)
       ax.set_ylabel('Fraction of population')
       if logy:
+        ax.get_legend().remove()
         ax.set_ylim(1 / avg_result.N)  # Below 1/N there's a lot of noise.
 
 
@@ -401,7 +426,7 @@ def clustering_coefficient_matters(mean_degree=MEAN_DEGREE):
     print('Clustering coef:', nx.average_clustering(nx.Graph(graph)))
     found_prob_infect = calibrate_doubling_time(G=graph, **kwargs)
     print('prob_infect:', found_prob_infect)
-    r0 = ballpark_r0(prob_infect=found_prob_infect, mean_degree=mean_degree)
+    r0 = ballpark_r(prob_infect=found_prob_infect, mean_degree=mean_degree)
     print('R0: ', r0)
 
 
@@ -452,28 +477,97 @@ def collect_results(paths):
   return summary_table
 
 
-def graph_parameters_sensitivity(all_paths):
-  summary_table = collect_results(all_paths)
-  summary_table['doublings_per_day'] = 1 / summary_table['doubling_days']
-  summary_table['growth_rate'] = 2**summary_table['doublings_per_day']
-  summary_table[['mean_degree', 'prob_infect', 'gamma','doubling_days', 'fraction_infected']].sort_values(['mean_degree', 'prob_infect', 'gamma'])
-  summary_table[['mean_degree', 'prob_infect', 'gamma','doubling_days', 'fraction_infected']].sort_values(['mean_degree', 'prob_infect', 'gamma']).query('prob_infect==0.01')
+def plot_growth_rate_vs_r(graph_st):
   fig, ax = plt.subplots()
-  # summary_table.query('prob_infect==0.01').plot.scatter(x='mean_degree', y='gamma', s=500, c='doubling_days', colormap='autumn', ax=ax)
-  summary_table.query('prob_infect==0.01').plot.scatter(x='mean_degree', y='gamma', s=500, c='growth_rate', colormap='Reds', ax=ax)
+  graph_st.query('r < 20 and growth_rate>1 and gamma<0.5').plot.scatter(x='r', y='growth_rate', s=100, c='gamma', alpha=0.5, colormap='cool', edgecolor='black', loglog=True, ax=ax)
+  ax.set_xlabel('r')
+  ax.set_ylabel('Daily Growth Rate')
+  ax.set_title('Epidemic Growth Rate vs. r')
+  # graph_st.plot.scatter(x='r', y='growth_rate', s=100, c='gamma', colormap='cool', loglog=True, ax=ax)
+  # Cosmetics for the graph.
+  # ax.xaxis.set_minor_formatter(FormatStrFormatter('%.1f'))
+  ax.xaxis.set_major_formatter(FormatStrFormatter('%d'))
+  ax.yaxis.set_minor_formatter(FormatStrFormatter('%d'))
+  ax.yaxis.set_major_formatter(FormatStrFormatter('%d'))
+  return ax
+
+def regress_predict_df(df, X_cols, y_col):
+  if isinstance(X_cols, str):
+    # Single column.
+    X_cols = [X_cols]
+  X = sm.add_constant(df[X_cols], prepend=False)
+  y = df[y_col]
+  regression_results = sm.OLS(y, X).fit()
+  predicted = regression_results.predict(X)
+  return predicted, regression_results
+
+def plot_growth_rate_vs_moment_ratio(graph_st):
+  """Growth rate vs. mu2/mu1 * infection by gamma, log-log plot."""
+  fig, ax = plt.subplots()
+  graph_st_for_plot = graph_st.query('r < 20 and gamma<0.5 and growth_rate>1').copy()
+  graph_st_for_plot.plot.scatter(x='infect_x_moment_ratio', y='growth_rate', s=100, c='gamma', alpha=0.5, colormap='cool', edgecolor='black', loglog=True, ax=ax)
+  # Calculate and add linear trendline.
+  graph_st_for_plot['log_infect_x_moment_ratio'] = np.log(graph_st_for_plot['infect_x_moment_ratio'])
+  graph_st_for_plot['log_growth_rate'] = np.log(graph_st_for_plot['growth_rate'])
+  predicted, regression_results = regress_predict_df(graph_st_for_plot, ['log_infect_x_moment_ratio'], 'log_growth_rate')
+  graph_st_for_plot['pred_growth_rate'] = np.exp(predicted)
+  print(regression_results.params)
+  graph_st_for_plot.sort_values('infect_x_moment_ratio').plot.line(x='infect_x_moment_ratio', y='pred_growth_rate', linestyle='--', c='k', loglog=True, label='linear trend', ax=ax)
+  ax.set_xlabel('mu2 / mu1 * infection probability')
+  ax.set_ylabel('Daily Growth Rate')
+  ax.set_title('Observed Growth Rate vs. Predicted')
+  # Cosmetics for the graph.
+  ax.xaxis.set_minor_formatter(FormatStrFormatter('%d'))
+  ax.xaxis.set_major_formatter(FormatStrFormatter('%d'))
+  ax.yaxis.set_minor_formatter(FormatStrFormatter('%d'))
+  ax.yaxis.set_major_formatter(FormatStrFormatter('%d'))
+
+  # graph_st.query('r < 20').plot.scatter(x='infect_x_moment_ratio', y='growth_rate', s=100, c='gamma', alpha=0.5, colormap='cool', edgecolor='black', loglog=True, ax=ax)
+  # graph_st.query('infect_x_moment_ratio < 10 and gamma<0.3 and growth_rate>1').plot.scatter(x='infect_x_moment_ratio', y='growth_rate', s=100, c='gamma', alpha=0.5, colormap='cool', edgecolor='black', loglog=True, ax=ax)
+  # graph_st.query('infect_x_moment_ratio < 100 and gamma<0.5 and growth_rate>1').plot.scatter(x='infect_x_moment_ratio', y='growth_rate', s=100, c='gamma', alpha=0.5, colormap='cool', edgecolor='black', loglog=True, ax=ax)
+  return ax
+
+
+def plot_trajectories_by_gamma(graph_st):
+  # Exposed + Infected over time with several gamma values.
+  # graph_st.query('r < 0.5 and r > 0.48')[['r', 'gamma', 'mean_degree', 'prob_infect']]
+  sim_rows = graph_st.query('r < 0.5 and r > 0.48 and gamma < 0.5')
+  result_lst = sim_rows['result']
+  trajectories = [
+      result_lst.iloc[i].df.set_index('day')[['exposed', 'infected']].sum(
+          axis=1).rename(sim_rows.iloc[i]['gamma']) / result_lst.iloc[i].N
+      for i in range(len(sim_rows))
+  ]
+  trajectory_df = pd.concat(trajectories, axis=1).sort_index(axis=1).ffill()
+  fig, ax = plt.subplots()
+  ax = trajectory_df.plot(logy=True, colormap='Spectral_r', linewidth=3, ax=ax)
+  # ax = pd.concat([result_lst.iloc[i].df.set_index('day')['recovered'].rename(sim_rows.iloc[i]['gamma']) / result_lst.iloc[i].N for i in range(len(sim_rows))], axis=1).sort_index(axis=1).ffill().plot(logy=True, ax=ax)
+  ax.legend(title='gamma')
+  ax.set_title('Trajectory with different gammas')
+  ax.set_ylabel('Exposed + Infected')
+  # (gamma, fraction_infected) pairs.
+  print(sorted(list(zip(sim_rows['gamma'], [result.fraction_infected for result in result_lst]))))
+
+
+def graph_parameters_sensitivity(all_paths):
+  """Analysis of simulation result sensitivity to graph parameters."""
+  graph_st = collect_results(all_paths)
+  graph_st['doublings_per_day'] = 1 / graph_st['doubling_days']
+  graph_st['growth_rate'] = 2**graph_st['doublings_per_day']
+  # graph_st[['mean_degree', 'prob_infect', 'gamma','doubling_days', 'fraction_infected']].sort_values(['mean_degree', 'prob_infect', 'gamma'])
+  # graph_st[['mean_degree', 'prob_infect', 'gamma','doubling_days', 'fraction_infected']].sort_values(['mean_degree', 'prob_infect', 'gamma']).query('prob_infect==0.01')
+  fig, ax = plt.subplots()
+  # graph_st.query('prob_infect==0.01').plot.scatter(x='mean_degree', y='gamma', s=500, c='doubling_days', colormap='autumn', ax=ax)
+  graph_st.query('prob_infect==0.01').plot.scatter(x='mean_degree', y='gamma', s=500, c='growth_rate', colormap='Reds', ax=ax)
 
   # Mean degree & prob_infect matter in the predictable way - through their product.
-  # summary_table.query('gamma==0.2 and prob_infect < 0.4').pivot_table(index='mean_degree', columns='prob_infect', values='growth_rate').plot(loglog=True)
-  summary_table['R0'] = summary_table.apply(lambda rec: ballpark_r0(prob_infect=rec['prob_infect'], mean_degree=rec['mean_degree'])[-1], axis=1)
-  summary_table['expected_infected_neighbors'] = summary_table['prob_infect'] * summary_table['mean_degree']
-  summary_table.query('gamma==0.2 and prob_infect < 0.4').plot.scatter(x='R0', y='growth_rate', loglog=True)
+  # graph_st.query('gamma==0.2 and prob_infect < 0.4').pivot_table(index='mean_degree', columns='prob_infect', values='growth_rate').plot(loglog=True)
+  graph_st['r'] = graph_st.apply(lambda rec: ballpark_r(prob_infect=rec['prob_infect'], mean_degree=rec['mean_degree'])[-1], axis=1)
+  graph_st.query('gamma==0.2 and prob_infect < 0.4').plot.scatter(x='r', y='growth_rate', loglog=True)
 
   # In one plot for many gamma values.
-  summary_table['gamma (log)'] = np.log(summary_table['gamma'])
-  fig, ax = plt.subplots()
-  summary_table.query('R0 < 20 and growth_rate>1 and gamma<0.5').plot.scatter(x='R0', y='growth_rate', s=100, c='gamma (log)', alpha=0.5, colormap='cool', edgecolor='black', loglog=True, ax=ax)
-  ax.set_ylabel('Daily Growth Rate')
-  # summary_table.plot.scatter(x='R0', y='growth_rate', s=100, c='gamma', colormap='cool', loglog=True, ax=ax)
+  graph_st['gamma (log)'] = np.log(graph_st['gamma'])
+  plot_growth_rate_vs_r(graph_st)
 
   def calc_moments(N, gamma=0.2, mean_degree=20, min_degree=2):
     degs = generate_power_law_degrees(int(N), min_degree, mean_degree, gamma)
@@ -483,21 +577,23 @@ def graph_parameters_sensitivity(all_paths):
     moments = calc_moments(N, gamma, mean_degree, min_degree)
     return moments[1] / moments[0]
 
-  graph_attrs = summary_table[['N', 'gamma', 'min_degree', 'mean_degree']].drop_duplicates().copy()
+  graph_attrs = graph_st[['N', 'gamma', 'min_degree', 'mean_degree']].drop_duplicates().copy()
   graph_attrs['moment_ratio'] = graph_attrs.apply(lambda rec: moment_ratio(rec['N'], rec['gamma'], rec['mean_degree'], rec['min_degree']), axis=1)
 
-  summary_table = summary_table.merge(graph_attrs, on=['N', 'gamma', 'min_degree', 'mean_degree'])
-  summary_table['infect_x_moment_ratio'] = summary_table.eval('prob_infect * moment_ratio')
+  graph_st = graph_st.merge(graph_attrs, on=['N', 'gamma', 'min_degree', 'mean_degree'])
+  graph_st['infect_x_moment_ratio'] = graph_st.eval('prob_infect * moment_ratio')
 
+  plot_growth_rate_vs_moment_ratio(graph_st)
+
+  # Herd immunity is reached with fewer nodes for larger gamma.
   fig, ax = plt.subplots()
-  summary_table.query('R0 < 20 and gamma<0.5 and growth_rate>1').plot.scatter(x='infect_x_moment_ratio', y='growth_rate', s=100, c='gamma (log)', alpha=0.5, colormap='cool', edgecolor='black', loglog=True, ax=ax)
+  graph_st.query('r < 20 and gamma<0.5 and growth_rate>1').plot.scatter(x='infect_x_moment_ratio', y='fraction_infected', s=100, c='gamma', alpha=0.5, colormap='cool', edgecolor='black', logx=True, ax=ax)
+  ax.set_ylabel('Share of Population Infected')
   ax.set_xlabel('mu2 / mu1 * infection probability')
-  ax.set_ylabel('Daily Growth Rate')
-  # summary_table.query('R0 < 20').plot.scatter(x='infect_x_moment_ratio', y='growth_rate', s=100, c='gamma (log)', alpha=0.5, colormap='cool', edgecolor='black', loglog=True, ax=ax)
-  # summary_table.query('infect_x_moment_ratio < 10 and gamma<0.3 and growth_rate>1').plot.scatter(x='infect_x_moment_ratio', y='growth_rate', s=100, c='gamma (log)', alpha=0.5, colormap='cool', edgecolor='black', loglog=True, ax=ax)
-  # summary_table.query('infect_x_moment_ratio < 100 and gamma<0.5 and growth_rate>1').plot.scatter(x='infect_x_moment_ratio', y='growth_rate', s=100, c='gamma (log)', alpha=0.5, colormap='cool', edgecolor='black', loglog=True, ax=ax)
 
-  return summary_table
+  # Exposed + Infected over time with several gamma values.
+  plot_trajectories_by_gamma(graph_st)
+  return graph_st
 
 
 def calibration_analysis():
@@ -567,6 +663,14 @@ def policy_contour_lines_plot2(table_no_genpop):
   #   tab.plot(x='fraction_infected', y='peak_test_rate', label=prob_neighbor_detected, marker='*', loglog=True, ax=ax)
   return ax
 
+
+def plot_repeated_simulations_example():
+  # Takes about an hour to run
+  result_lst = repeated_sim(n_runs=10, N=100000, G=None, prob_infected_detected=0.5, prob_neighbor_detected=0, initial_infected_num=100, aggregate=False, verbose=True)
+  # experiments.plot_result_list(result_lst, columns=MAIN_GROUPS + ['test_rate'], vertical=True)
+  experiments.plot_result_list(result_lst, columns=MAIN_GROUPS, vertical=True)
+
+
 def outcome_bar_chart(tab_indexed, title='', logy=True, plot_columns=OUTCOME_COLUMNS, ylim=(0.0003, 10), **kwargs):
   ax = tab_indexed[plot_columns].plot.bar(logy=logy, title=title, **kwargs)
   ax.set_ylim(ylim)
@@ -594,12 +698,23 @@ def test_symptomatic_vs_genpop_barcharts(table_filtered, quarantine_neighbors, l
   ax.set_xlabel('Fraction tested per day')
 
 
+def plot_basic_progression(summary_table):
+  result = summary_table.query('prob_infected_detected==0 and prob_neighbor_detected==0 and prob_exposed_detected==0 and prob_infect==0.022 and quarantine_neighbors==False and initial_infected_num==100')['result'].iloc[0]
+  result = seir.SimulationResults(result.df)  # Refresh class properties.
+  # Vertical
+  result.summary(plot=1, vertical=True)
+  # Horizontal
+  result.summary(plot=1, vertical=False)
+
+
 def testing_quarantine_scenarios_analysis():
   """Produce charts comparing testing of symptomatic, tracing, and general population."""
   summary_table = collect_results('quarantine*')
   nu = summary_table.nunique()
   varying_cols = nu[(nu > 1) & (nu < 20)].index.tolist()
   summary_table.drop_duplicates(subset=varying_cols, keep='last', inplace=True)
+
+  plot_basic_progression(summary_table)
 
   summary_table['Days to Detect Infected'] = np.round(1 / summary_table['prob_infected_detected'], 2)
   summary_table['Share of Population Infected'] = summary_table['fraction_infected']
@@ -618,7 +733,7 @@ def testing_quarantine_scenarios_analysis():
     # Show that quarantining only the symptomatic, but immediately (prob=5) gives containment, though imperfect.
     test_symptomatic_vs_genpop_barcharts(table_filtered, quarantine_neighbors=False, days_to_detect_infected=[0.2, 0.5, 1.0, 2.0, 10.0])
     # With quarantining also neighbors, more leeway.
-    test_symptomatic_vs_genpop_barcharts(table_filtered, quarantine_neighbors=True, days_to_detect_infected=[0.2, 1.0, 2.0, 10.0, 20.0])
+    # test_symptomatic_vs_genpop_barcharts(table_filtered, quarantine_neighbors=True, days_to_detect_infected=[0.2, 1.0, 2.0, 10.0, 20.0])
 
     # Policy scatters: testing the infected vs. testing the general population.
     table_no_zeros = table_no_tracing.query('quarantine_neighbors and prob_infected_detected > 0 and prob_exposed_detected > 0')
@@ -636,13 +751,13 @@ def testing_quarantine_scenarios_analysis():
     my_relplot(table_no_genpop, x='fraction_infected', y='peak_test_rate', c='prob_neighbor_detected', colormap='Set1', s=2000, marker='Days To Detect Infected', c_categorical=True, alpha=0.5, edgecolor='black', loglog=True, title=f'Infection Probability = {prob_infect}')
     # my_relplot(table_no_genpop, x='fraction_infected', y='fraction_tests', c='prob_neighbor_detected', colormap='Set1', s=2000, marker='Days To Detect Infected', c_categorical=True, alpha=0.5, edgecolor='black', loglog=True, title=f'Infection Probability = {prob_infect}')
     my_relplot(table_no_genpop, x='fraction_infected', y='fraction_quarantine_time', c='prob_neighbor_detected', colormap='Set1', s=2000, marker='Days To Detect Infected', c_categorical=True, alpha=0.5, edgecolor='black', loglog=True, title=f'Infection Probability = {prob_infect}')
+    # Test & trace bar charts for specific prob_infected_detected.
+    outcome_bar_chart(table_no_genpop.query('prob_infected_detected==0.5').set_index('Share of Contacts Tested').sort_index(ascending=False), title=f'Contact tracing, infection probability={prob_infect}')
+    outcome_bar_chart(table_no_genpop.query('prob_infected_detected==0.5').set_index('Share of Contacts Tested').sort_index(ascending=False), title='Contact tracing')
 
     # Policy countour lines
     ax = policy_contour_lines_plot2(table_no_genpop)
     ax.set_title(f'Policy contour lines, infection probability={prob_infect}')
-    # Bar chart for specific prob_infected_detected.
-    outcome_bar_chart(table_no_genpop.query('prob_infected_detected==0.5').set_index('Share of Contacts Tested').sort_index(ascending=False), title=f'Contact tracing, infection probability={prob_infect}')
-    outcome_bar_chart(table_no_genpop.query('prob_infected_detected==0.5').set_index('Share of Contacts Tested').sort_index(ascending=False), title='Contact tracing')
 
     # Mass testing with contact tracing.
     table_no_test_infected = table_filtered.query('prob_infected_detected==0')
