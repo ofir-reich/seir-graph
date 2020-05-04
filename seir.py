@@ -42,11 +42,10 @@ INITIAL_INFECTED_NUM = 10
 # to infect a Susceptible. Fitted to produce doubling_time=3.13 For G with parameters
 # (100000, 2, 20, 0.2). Though R0 might still be too small here: 2.0.
 PROB_INFECT = 0.022
-# In a single interaction on a single day, how much less likely is an Exposed,
-# in his infectious period before becoming contagious,
-# to infect a Susceptible than an Infected to infect a Susceptible.
-# In other words, prob_infect_exposed = prob_infect * PROB_INFECT_EXPOSED_FACTOR.
-# Set to 0 to make the Exposed non-infectious.
+# Ratio of infectiousness between Exposed (in the final days before becoming
+# Infected) and Infected. In other words,
+# prob_infect_exposed = prob_infect * prob_infect_exposed_factor.
+# Set this to 0 to make the Exposed non-infectious.
 PROB_INFECT_EXPOSED_FACTOR = 0.5
 # How many days before developing symptoms (becoming Infected) an Exposed
 # individual is contagious. Questionable evidence, but 1-2 produces a reasonable R0.
@@ -63,20 +62,19 @@ INCUBATION_DURATION_STD = 4.38
 PROB_RECOVER = 1 / 3.5
 # Length of imposed quarantine, in days.
 DAYS_IN_QUARANTINE = 14
-# Probability that an Infected individual is tested and detected as sick in a single day.
+# Probability that an Infected individual is tested and detected a carriers in a single day.
 # This encapsulates also the fact that many people are asymptomatic or will
-# not be tested (or are not quarantined). They become Quarantined.
+# not be tested (or are not quarantined).
 # Default: no tests at all.
 PROB_INFECTED_DETECTED = 0
 # Probability that a neighbor of an individual who tested positive is himself tested
-# and detected as sick. This encapsulates the probability that they are traced
+# and detected as a carrier. This encapsulates the probability that they are traced
 # as well. The testing of neighbors happens once, once the original individual
-# is tested positive, so this is *not* a probability per day. They become Quarantined.
+# is tested positive, so this is *not* a probability per day.
 # Default - no neighbors are tested or detected.
 PROB_NEIGHBOR_DETECTED = 0
-# Probability that an Exposed individual is tested and detected as sick in a single day.
-# This encapsulates the fact that they are presymptomatic so the entire population
-# needs to be tested, and the test false negatives. They become Quarantined.
+# Share of the general population which is tested on a single day. Exposed and
+# Infected individuals who are tested are detected as carriers.
 # Default - previous behavior, no exposed are detected.
 PROB_EXPOSED_DETECTED = 0
 # When an individual tests positive, whether their neighbors are quarantined as well.
@@ -205,7 +203,7 @@ class SimulationResults(object):
     self.fraction_tests = total_tests / self.N
     self.peak_test_rate = results_df['test_rate'].max() / self.N
 
-  def plot_trends(self, fraction_of_population=True, hyperparams=True, G_attrs=False, columns=None):
+  def plot_trends(self, fraction_of_population=True, hyperparams=True, G_attrs=False, columns=None, vertical=False):
     """Plots the time series of self.df, with the specified columns."""
     if columns is None:
       columns = MAIN_GROUPS
@@ -222,13 +220,20 @@ class SimulationResults(object):
       scale = 1
       ylabel = 'Individuals'
 
-    fig, ax_arr = plt.subplots(1, 2)
+    if vertical:
+      fig, ax_arr = plt.subplots(2, 1, figsize=(10, 20))
+      ax_arr[0].set_title('Epidemic Simulation')
+      ax_arr[1].set_title('log scale')
+    else:
+      fig, ax_arr = plt.subplots(1, 2)
     fig.suptitle(title, fontsize=18)
     results_to_plot = self.df.drop('step', axis=1).set_index('day') / scale
     results_to_plot = results_to_plot[columns]
     for pane_ind, logy in enumerate([False, True]):
       ax = results_to_plot.plot(ax=ax_arr[pane_ind], logy=logy)
       ax.set_ylabel(ylabel)
+      if logy:
+        ax.get_legend().remove()
     return ax_arr
 
   def summary(self, hyperparams=False, G_attrs=False, plot=False, **plot_kwargs):
@@ -254,6 +259,7 @@ def get_gamma_distribution_params(mean, std):
 
 
 def edges2graph(edges, N=N):
+  """Creates MultiGraph from list of edges."""
   H = nx.MultiGraph()
   H.add_nodes_from(np.arange(N))
   H.add_edges_from(edges)
@@ -383,23 +389,26 @@ def generate_local_scale_free_graph(N=N, n_divisions=4, min_degree=MIN_DEGREE,
   return H
 
 
-def random_subset(indicator_arr, sample_prob):
-  """In array of 0,1 leave subset of 1s with probability sample_prob.
+def random_subset(indicator_arr, sample_probs):
+  """In array of 0,1 leave subset of 1s with probabilities sample_probs.
 
-  sample_prob can also be an array with same shape as indicator_arr, for
-  individual heterogeneous sampling probabilities.
+  Args:
+    indicator_arr: An array of 0,1 values.
+    sample_probs: A number or an array with same shape as indicator_arr, for
+      individual heterogeneous sampling probabilities.
   """
-  subset_arr = (np.random.random(indicator_arr.shape) < sample_prob) & indicator_arr
+  subset_arr = (np.random.random(indicator_arr.shape) < sample_probs) & indicator_arr
   return subset_arr
 
 
 def init_states(N=N, initial_infected_num=INITIAL_INFECTED_NUM, incubation_duration_mean=INCUBATION_DURATION_MEAN, incubation_duration_std=INCUBATION_DURATION_STD, prob_recover=PROB_RECOVER):
-  """Each group has an array of 0/1 indicators, and potentially days left array.
+  """Init the state variables of the simulation.
 
+  Each group has an array of 0/1 indicators, and potentially days left array.
   Susceptible (S_arr), Exposed (E_arr, E_left), Infected (I_arr),
   Recovered (R_arr), Quarantined (Q_arr, Q_left), Tested Positive (TP_arr).
-  Indicator value of 1 means the individual is a member of that group.
-  *_left arrays are arrays of number of days left until transition to next state.
+  i-th indicator value of 1 means the i-th node is a member of that group.
+  *_left are arrays of number of days left until transition to next state.
 
   Args:
     prob_recover: per day. Inverse of expected duration of being Infected.
@@ -452,6 +461,9 @@ def individual_infection_probabilities(I_arr, Q_arr, prob_infect, adj_mat):
   probability of being infected.
   Probability of being infected by each connection is prob_infect.
   Quarantined (Q_arr) are not infectious.
+
+  Args:
+    adj_mat: Adjacency matrix of the graph.
   """
   # Number of connections to infected (could be multiple connections from the same infected)
   connections_to_I = number_of_edges_to_group(I_arr & (1 - Q_arr), adj_mat)
@@ -530,9 +542,9 @@ def testing_step(E_arr, I_arr, TP_arr,
                  prob_neighbor_detected,
                  prob_exposed_detected,
                  adj_mat=None):
-  """Testing of subsets of Infected, neighbors, general population.
+  """Testing of subsets of Infected, the general population. Contact tracing.
 
-  A test is positive if a node is either Exposed or Infectious.
+  A test comes out positive if a node is either Exposed or Infected.
   Test symptomatics: a random subset of Infected people are tested (and found positive).
   Mass-testing: a random subset of Exposed & Infected people test positive.
   Contact tracing: a random subset of neighbors of those who tested positive, are also tested.
@@ -596,7 +608,7 @@ def quarantine_step(E_arr, I_arr, Q_arr, Q_left, R_arr, TP_arr, adj_mat=None,
   Args:
     Q_left: Array of days left in quarantine. When reaches 0, quarantine ends.
     TP_arr: array indicating those who tested positive.
-    quarantine_neighbors: an individual's neighbors are quarantined as well.
+    quarantine_neighbors: a positive's neighbors are quarantined as well.
   """
   Q_left -= 1 / steps_per_day  # Decrease time left in Quarantine.
   # Known positives who haven't recovered.
@@ -661,6 +673,50 @@ def simulation(N=N,
   """Simulates SEQIR model on a specified network. Includes Quarantine group.
 
   All probabilities in args are *daily* probabilities.
+
+  Args:
+    N: Number of nodes in the simulation.
+    G: Graph on which to run the simulation. If None, generated using N and the
+      args of graph attribute below.
+    initial_infected_num: Number of individuals infected at t=0.
+    prob_infect: In a single interaction on a single day, what is the chance of
+     an Infectious to infect a Susceptible.
+    incubation_duration_mean: Incubation period duration distribution mean. In
+      days.
+    incubation_duration_std: Incubation period duration distribution standard
+      deviation. In days.
+    prob_recover: Probability to change from Infections to Recovered in a single
+      day.
+    quarantine_neighbors: When an individual tests positive, whether their
+      neighbors are quarantined as well.
+    prob_infected_detected: Probability that an Infected individual is tested
+      and detected as a carrier in a single day. This encapsulates also the fact
+      that many people are asymptomatic or will not be tested (or are not
+      quarantined).
+    prob_neighbor_detected: Probability that a neighbor of an individual who
+      tested positive is himself tested and detected as carriers. This encapsulates
+      the probability that they are traced as well. The testing of neighbors
+      happens once, once the original individual is tested positive, so this is
+      *not* a probability per day.
+    prob_exposed_detected: Share of the general population which is tested on a
+      single day. Exposed and Infected individuals who are tested are detected
+      as carriers.
+    days_in_quarantine: Length of imposed quarantine, in days.
+    prob_infect_exposed_factor: Ratio of infectiousness between Exposed (in the
+      final days before becoming Infected) and Infected. In other words,
+      prob_infect_exposed = prob_infect * prob_infect_exposed_factor.
+      Set this to 0 to make the Exposed non-infectious.
+    duration_exposed_infects: How many days before developing symptoms (becoming
+      Infected) an Exposed individual is contagious. Questionable evidence, but
+      1-2 produces a reasonable R0.
+    steps_per_day: Number of simulation steps per one day of real life time.
+    min_degree: Minimal degree of nodes in a generated graph.
+    mean_degree: Mean degree of nodes in a generated graph.
+    gamma: Parameter of degree distribution in generated graph.
+      Higher gamma means a fatter tail of the degree distribution.
+    max_steps: Maximal number of steps in simulation. If this number is reached,
+      simulation stops.
+    verbose: Whether to print some progress indicators.
   """
   # Process input.
   if G is None:
